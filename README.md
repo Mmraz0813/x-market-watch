@@ -32,10 +32,15 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getUpdates"
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install ".[dev]"
+```
+
+启动网页控制台后，可以直接在“设置”页面填写密钥和运行参数。你也可以手动创建 `.env`：
+
+```bash
 cp .env.example .env
 ```
 
-编辑 `.env`：
+`.env` 示例：
 
 ```bash
 X_AUTH_MODE=bearer
@@ -122,7 +127,19 @@ http://127.0.0.1:8787
 
 密钥字段不会在网页里明文显示。已配置的密钥会显示为掩码；如果不想修改，保存时留空即可。如果输入新值，会覆盖 `.env` 里的旧值。
 
-如果部署在云服务器，并希望从电脑浏览器访问这个控制台，把 `.env` 改成：
+如果用 Docker 部署，控制台会默认把配置保存到 `data/.env`，所以你可以先启动容器，再在网页里填写配置。
+
+```bash
+docker compose up -d --build
+```
+
+然后访问：
+
+```text
+http://设备IP:8787
+```
+
+如果部署在云服务器或软路由，并希望从电脑浏览器访问这个控制台，需要确保设置里是：
 
 ```bash
 WEB_HOST=0.0.0.0

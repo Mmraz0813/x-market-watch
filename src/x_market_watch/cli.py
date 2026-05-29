@@ -15,6 +15,7 @@ from x_market_watch.x_client import XClient
 
 def main() -> None:
     load_dotenv()
+    load_dotenv("data/.env", override=True)
     parser = argparse.ArgumentParser(prog="x-market-watch")
     parser.add_argument(
         "command",

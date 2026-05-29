@@ -1,8 +1,8 @@
 services:
   x-market-watch:
     build: .
-    env_file:
-      - .env
+    environment:
+      X_MARKET_WATCH_ENV_PATH: data/.env
     volumes:
       - ./data:/app/data
     ports:

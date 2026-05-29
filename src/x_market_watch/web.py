@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -18,7 +19,7 @@ from x_market_watch.state import StateStore
 
 logger = logging.getLogger(__name__)
 
-ENV_PATH = Path(".env")
+ENV_PATH = Path(os.environ.get("X_MARKET_WATCH_ENV_PATH", ".env"))
 SECRET_ENV_KEYS = {
     "X_BEARER_TOKEN",
     "X_API_KEY",
