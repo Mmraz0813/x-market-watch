@@ -131,9 +131,13 @@ class WebController:
             "fields": [
                 {
                     "key": key,
-                    "value": "" if key in SECRET_ENV_KEYS else values.get(key, ""),
+                    "value": "" if key in SECRET_ENV_KEYS else self._effective_env_value(key),
                     "masked": _mask(values.get(key, "")) if key in SECRET_ENV_KEYS else "",
-                    "configured": _looks_configured(values.get(key)),
+                    "configured": _looks_configured(
+                        values.get(key)
+                        if key in SECRET_ENV_KEYS
+                        else self._effective_env_value(key)
+                    ),
                     "secret": key in SECRET_ENV_KEYS,
                 }
                 for key in EDITABLE_ENV_FIELDS
@@ -150,7 +154,7 @@ class WebController:
             if key not in updates:
                 continue
             value = str(updates.get(key, "")).strip()
-            if key in SECRET_ENV_KEYS and not value:
+            if not value:
                 continue
             normalized[key] = value
 
@@ -165,6 +169,13 @@ class WebController:
                 ENV_PATH.write_text(previous, encoding="utf-8")
             raise
         return self.env_payload()
+
+    def _effective_env_value(self, key: str) -> str:
+        attr_name = key.lower()
+        if not hasattr(self.settings, attr_name):
+            return ""
+        value = getattr(self.settings, attr_name)
+        return str(value) if value is not None else ""
 
     def job_payload(self) -> dict[str, Any]:
         with self._lock:
