@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from x_market_watch.formatter import format_signal
+from x_market_watch.history import SignalHistoryStore, StoredSignal
 from x_market_watch.llm import LLMAnalyzer
 from x_market_watch.models import Post
 from x_market_watch.oauth1 import OAuth1Signer
@@ -14,10 +16,18 @@ from x_market_watch.x_client import XClient
 logger = logging.getLogger(__name__)
 
 
+class PipelineCancelled(RuntimeError):
+    pass
+
+
 class Pipeline:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.state_store = StateStore(settings.state_path)
+        self.history_store = SignalHistoryStore(
+            settings.signal_history_path,
+            limit=settings.signal_history_limit,
+        )
         self.x_client = XClient(
             str(settings.x_bearer_token),
             str(settings.x_api_base),
@@ -36,7 +46,12 @@ class Pipeline:
         self.analyzer.close()
         self.telegram.close()
 
-    def run_once(self, dry_run: bool = False) -> int:
+    def run_once(
+        self,
+        dry_run: bool = False,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> int:
+        self._raise_if_cancelled(cancel_check)
         state = self.state_store.load()
         posts = self.x_client.fetch_list_posts(
             list_id=self.settings.x_list_id,
@@ -44,6 +59,7 @@ class Pipeline:
             max_pages=self.settings.x_max_pages,
             stop_after_id=state.last_seen_id,
         )
+        self._raise_if_cancelled(cancel_check)
         if state.last_seen_id:
             posts = [post for post in posts if int(post.id) > int(state.last_seen_id)]
         posts = self._sort_newest_payload_chronologically(posts)
@@ -52,6 +68,7 @@ class Pipeline:
             return 0
 
         signals = self.analyzer.analyze(posts)
+        self._raise_if_cancelled(cancel_check)
         posts_by_id = {post.id: post for post in posts}
         kept = [
             signal
@@ -60,7 +77,9 @@ class Pipeline:
         ]
 
         sent_count = 0
+        stored_signals: list[StoredSignal] = []
         for signal in kept:
+            self._raise_if_cancelled(cancel_check)
             post = posts_by_id.get(signal.post_id)
             if post is None:
                 continue
@@ -70,6 +89,10 @@ class Pipeline:
             else:
                 self.telegram.send_message(message)
             sent_count += 1
+            stored_signals.append(StoredSignal.from_signal(signal, post, dry_run=dry_run))
+
+        self.history_store.add_many(stored_signals)
+        self._raise_if_cancelled(cancel_check)
 
         state.last_seen_id = max(posts, key=lambda item: int(item.id)).id
         if not dry_run:
@@ -80,6 +103,11 @@ class Pipeline:
     @staticmethod
     def _sort_newest_payload_chronologically(posts: list[Post]) -> list[Post]:
         return sorted(posts, key=lambda item: int(item.id))
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_check: Callable[[], bool] | None) -> None:
+        if cancel_check and cancel_check():
+            raise PipelineCancelled("Pipeline run was stopped by the web console.")
 
 
 def _build_oauth1_signer(settings: Settings) -> OAuth1Signer | None:

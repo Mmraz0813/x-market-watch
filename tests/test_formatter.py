@@ -26,8 +26,10 @@ def test_format_signal_escapes_html() -> None:
 
     assert "&lt;breakout&gt;" in message
     assert "Alice &lt;A&gt;" in message
-    assert "时间：2026/01/01" in message
+    assert "时间：2026/01/01 00:00" in message
     assert "相关股票代码：$NVDA $AMD" in message
+    assert "内容：可能影响 &lt;NVDA&gt;" in message
+    assert "互动" not in message
     assert "重要性" not in message
 
 

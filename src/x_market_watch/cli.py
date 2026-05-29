@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from x_market_watch.pipeline import Pipeline, _build_oauth1_signer
 from x_market_watch.settings import Settings
+from x_market_watch.web import run_web_server
 from x_market_watch.x_client import XClient
 
 
@@ -18,9 +19,9 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["run-once", "daemon", "debug-x"],
+        choices=["run-once", "daemon", "debug-x", "web"],
         default="run-once",
-        help="Run once, keep polling forever, or inspect the raw X API response.",
+        help="Run once, keep polling forever, inspect X, or start the web console.",
     )
     parser.add_argument(
         "--dry-run",
@@ -37,6 +38,10 @@ def main() -> None:
 
     if args.command == "debug-x":
         debug_x(settings)
+        return
+
+    if args.command == "web":
+        run_web_server(settings, host=settings.web_host, port=settings.web_port)
         return
 
     pipeline = Pipeline(settings)

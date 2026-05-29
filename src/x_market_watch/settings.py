@@ -31,4 +31,8 @@ class Settings(BaseSettings):
 
     poll_interval_seconds: PositiveInt = Field(300, alias="POLL_INTERVAL_SECONDS")
     state_path: Path = Field(Path("data/state.json"), alias="STATE_PATH")
+    signal_history_path: Path = Field(Path("data/signals.json"), alias="SIGNAL_HISTORY_PATH")
+    signal_history_limit: int = Field(200, ge=20, le=2000, alias="SIGNAL_HISTORY_LIMIT")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    web_host: str = Field("127.0.0.1", alias="WEB_HOST")
+    web_port: int = Field(8787, ge=1, le=65535, alias="WEB_PORT")
