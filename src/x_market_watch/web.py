@@ -149,10 +149,6 @@ class WebController:
         }
 
     def save_env(self, updates: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            if self._job.running:
-                raise RuntimeError("任务运行中，先等本轮结束再修改配置。")
-
         normalized: dict[str, str] = {}
         for key in EDITABLE_ENV_FIELDS:
             if key not in updates:
@@ -182,10 +178,25 @@ class WebController:
         if not self.settings.web_auto_poll:
             logger.info("Web auto polling is disabled")
             return
+        self.start_polling(source="auto")
+
+    def start_polling(self, source: str = "manual") -> tuple[bool, dict[str, Any]]:
         if self._scheduler_thread and self._scheduler_thread.is_alive():
-            return
+            with self._lock:
+                return False, self._serialize_job_locked()
+        self._scheduler_stop.clear()
+        with self._lock:
+            self._job = JobState(
+                running=True,
+                dry_run=False,
+                status="polling",
+                started_at=_now_iso(),
+                logs=[f"Started live polling ({source})."],
+            )
         self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._scheduler_thread.start()
+        with self._lock:
+            return True, self._serialize_job_locked()
 
     def stop_scheduler(self) -> None:
         self._scheduler_stop.set()
@@ -193,28 +204,36 @@ class WebController:
             self._scheduler_thread.join(timeout=5)
 
     def _scheduler_loop(self) -> None:
-        logger.info(
-            "Web auto polling enabled; interval=%s seconds",
-            self.settings.poll_interval_seconds,
-        )
+        logger.info("Web polling loop started")
         while not self._scheduler_stop.is_set():
-            if not self.settings.web_auto_poll:
-                logger.info("Web auto polling is disabled")
-            elif _runtime_ready(self.settings):
-                started, _job = self.start_run(dry_run=False, source="auto")
-                if started:
-                    self._wait_for_current_job()
+            if _runtime_ready(self.settings):
+                self.add_log("Polling cycle started.")
+                try:
+                    sent_count = self._execute_pipeline(dry_run=False)
+                except PipelineCancelled:
+                    self.add_log("Polling stopped.")
+                    break
+                except Exception as exc:  # noqa: BLE001 - keep polling after transient failures.
+                    logger.exception("Web polling cycle failed")
+                    self.add_log(f"ERROR - {exc}")
+                    with self._lock:
+                        self._job.error = str(exc)
+                else:
+                    with self._lock:
+                        self._job.sent_count = sent_count
+                        self._job.error = None
+                        self._job.logs.append(
+                            f"Polling cycle finished. Sent {sent_count} Telegram message(s)."
+                        )
             else:
-                logger.info("Web auto polling is waiting for required settings")
+                self.add_log("Polling is waiting for required settings.")
 
             interval = max(1, int(self.settings.poll_interval_seconds))
             self._scheduler_stop.wait(interval)
-
-    def _wait_for_current_job(self) -> None:
-        while not self._scheduler_stop.wait(1):
-            with self._lock:
-                if not self._job.running:
-                    return
+        with self._lock:
+            self._job.running = False
+            self._job.status = "stopped"
+            self._job.finished_at = _now_iso()
 
     def _effective_env_value(self, key: str) -> str:
         attr_name = key.lower()
@@ -234,9 +253,12 @@ class WebController:
             self._job.stop_requested = True
             self._job.status = "stopping"
             self._job.logs.append("Stop requested. Waiting for the current safe checkpoint.")
+            self._scheduler_stop.set()
             return self._serialize_job_locked()
 
     def start_run(self, dry_run: bool, source: str = "manual") -> tuple[bool, dict[str, Any]]:
+        if not dry_run:
+            return self.start_polling(source=source)
         with self._lock:
             if self._job.running:
                 return False, self._serialize_job_locked()
@@ -254,17 +276,8 @@ class WebController:
             return True, self._serialize_job_locked()
 
     def _run_pipeline(self, dry_run: bool) -> None:
-        handler = _MemoryLogHandler(self)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s - %(message)s"))
-        app_logger = logging.getLogger("x_market_watch")
-        app_logger.addHandler(handler)
-        previous_level = app_logger.level
-        if previous_level > logging.INFO or previous_level == logging.NOTSET:
-            app_logger.setLevel(logging.INFO)
-
-        pipeline = Pipeline(self.settings)
         try:
-            sent_count = pipeline.run_once(dry_run=dry_run, cancel_check=self._stop_requested)
+            sent_count = self._execute_pipeline(dry_run=dry_run)
         except PipelineCancelled as exc:
             self.add_log(str(exc))
             with self._lock:
@@ -285,7 +298,20 @@ class WebController:
                 self._job.status = "completed"
                 self._job.sent_count = sent_count
                 self._job.finished_at = _now_iso()
-                self._job.logs.append(f"Completed. Sent {sent_count} Telegram message(s).")
+                self._job.logs.append(f"Dry run completed. Found {sent_count} signal(s).")
+
+    def _execute_pipeline(self, dry_run: bool) -> int:
+        handler = _MemoryLogHandler(self)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s - %(message)s"))
+        app_logger = logging.getLogger("x_market_watch")
+        app_logger.addHandler(handler)
+        previous_level = app_logger.level
+        if previous_level > logging.INFO or previous_level == logging.NOTSET:
+            app_logger.setLevel(logging.INFO)
+
+        pipeline = Pipeline(self.settings)
+        try:
+            return pipeline.run_once(dry_run=dry_run, cancel_check=self._stop_requested)
         finally:
             pipeline.close()
             app_logger.removeHandler(handler)
@@ -1489,6 +1515,7 @@ INDEX_HTML = r"""<!doctype html>
 
     function titleForJob(job) {
       if (job.status === "stopping") return "正在停止";
+      if (job.status === "polling") return "持续轮询中";
       if (job.running) return job.dry_run ? "Dry-run 运行中" : "正式运行中";
       if (job.status === "stopped") return "已停止";
       if (job.status === "failed") return "任务失败";
@@ -1498,6 +1525,7 @@ INDEX_HTML = r"""<!doctype html>
 
     function subtitleForJob(job) {
       if (job.status === "stopping") return "已收到停止请求，正在等待安全停止点。";
+      if (job.status === "polling") return `按轮询间隔自动运行，开始于 ${fmtDate(job.started_at)}`;
       if (job.running) return `开始于 ${fmtDate(job.started_at)}`;
       if (job.status === "stopped") return `停止于 ${fmtDate(job.finished_at)}`;
       if (job.status === "failed") return job.error || "请查看日志定位错误。";
