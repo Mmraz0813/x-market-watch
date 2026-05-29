@@ -41,3 +41,4 @@ class Settings(BaseSettings):
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     web_host: str = Field("127.0.0.1", alias="WEB_HOST")
     web_port: int = Field(8787, ge=1, le=65535, alias="WEB_PORT")
+    web_auto_poll: bool = Field(True, alias="WEB_AUTO_POLL")

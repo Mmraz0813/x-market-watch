@@ -5,6 +5,7 @@ services:
       X_MARKET_WATCH_ENV_PATH: data/.env
       WEB_HOST: 0.0.0.0
       WEB_PORT: 8787
+      WEB_AUTO_POLL: "true"
     volumes:
       - ./data:/app/data
     ports:

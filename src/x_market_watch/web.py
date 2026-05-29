@@ -54,6 +54,7 @@ EDITABLE_ENV_FIELDS = [
     "LOG_LEVEL",
     "WEB_HOST",
     "WEB_PORT",
+    "WEB_AUTO_POLL",
 ]
 
 
@@ -75,6 +76,8 @@ class WebController:
         self.settings = settings
         self._lock = threading.Lock()
         self._job = JobState()
+        self._scheduler_stop = threading.Event()
+        self._scheduler_thread: threading.Thread | None = None
 
     def status_payload(self) -> dict[str, Any]:
         settings = self.settings
@@ -101,6 +104,7 @@ class WebController:
                 "llm_min_importance": settings.llm_min_importance,
                 "telegram_chat_id": _mask(settings.telegram_chat_id),
                 "poll_interval_seconds": settings.poll_interval_seconds,
+                "web_auto_poll": settings.web_auto_poll,
                 "state_path": str(state_path),
             },
             "checks": {
@@ -168,7 +172,49 @@ class WebController:
             else:
                 ENV_PATH.write_text(previous, encoding="utf-8")
             raise
+        if self.settings.web_auto_poll:
+            self.start_scheduler()
+        else:
+            self.stop_scheduler()
         return self.env_payload()
+
+    def start_scheduler(self) -> None:
+        if not self.settings.web_auto_poll:
+            logger.info("Web auto polling is disabled")
+            return
+        if self._scheduler_thread and self._scheduler_thread.is_alive():
+            return
+        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+        self._scheduler_thread.start()
+
+    def stop_scheduler(self) -> None:
+        self._scheduler_stop.set()
+        if self._scheduler_thread and self._scheduler_thread.is_alive():
+            self._scheduler_thread.join(timeout=5)
+
+    def _scheduler_loop(self) -> None:
+        logger.info(
+            "Web auto polling enabled; interval=%s seconds",
+            self.settings.poll_interval_seconds,
+        )
+        while not self._scheduler_stop.is_set():
+            if not self.settings.web_auto_poll:
+                logger.info("Web auto polling is disabled")
+            elif _runtime_ready(self.settings):
+                started, _job = self.start_run(dry_run=False, source="auto")
+                if started:
+                    self._wait_for_current_job()
+            else:
+                logger.info("Web auto polling is waiting for required settings")
+
+            interval = max(1, int(self.settings.poll_interval_seconds))
+            self._scheduler_stop.wait(interval)
+
+    def _wait_for_current_job(self) -> None:
+        while not self._scheduler_stop.wait(1):
+            with self._lock:
+                if not self._job.running:
+                    return
 
     def _effective_env_value(self, key: str) -> str:
         attr_name = key.lower()
@@ -190,7 +236,7 @@ class WebController:
             self._job.logs.append("Stop requested. Waiting for the current safe checkpoint.")
             return self._serialize_job_locked()
 
-    def start_run(self, dry_run: bool) -> tuple[bool, dict[str, Any]]:
+    def start_run(self, dry_run: bool, source: str = "manual") -> tuple[bool, dict[str, Any]]:
         with self._lock:
             if self._job.running:
                 return False, self._serialize_job_locked()
@@ -199,7 +245,7 @@ class WebController:
                 dry_run=dry_run,
                 status="running",
                 started_at=_now_iso(),
-                logs=[f"Started {'dry run' if dry_run else 'live run'}."],
+                logs=[f"Started {'dry run' if dry_run else 'live run'} ({source})."],
             )
 
         thread = threading.Thread(target=self._run_pipeline, args=(dry_run,), daemon=True)
@@ -289,11 +335,13 @@ def run_web_server(settings: Settings, host: str = "127.0.0.1", port: int = 8787
     RequestHandler.controller = controller
     server = ThreadingHTTPServer((host, port), RequestHandler)
     logger.info("Web console listening on http://%s:%s", host, port)
+    controller.start_scheduler()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("Web console stopped")
     finally:
+        controller.stop_scheduler()
         server.server_close()
 
 
@@ -406,6 +454,17 @@ def _x_credentials_ready(settings: Settings) -> bool:
             ]
         )
     return _looks_configured(settings.x_bearer_token)
+
+
+def _runtime_ready(settings: Settings) -> bool:
+    return (
+        _x_credentials_ready(settings)
+        and _looks_configured(settings.x_list_id)
+        and settings.x_list_id != "1234567890"
+        and _looks_configured(settings.llm_api_key)
+        and _looks_configured(settings.telegram_bot_token)
+        and _looks_configured(settings.telegram_chat_id)
+    )
 
 
 def _read_env_values(path: Path) -> dict[str, str]:
@@ -1501,7 +1560,8 @@ INDEX_HTML = r"""<!doctype html>
         SIGNAL_HISTORY_LIMIT: "信号历史条数",
         LOG_LEVEL: "日志级别",
         WEB_HOST: "Web Host",
-        WEB_PORT: "Web Port"
+        WEB_PORT: "Web Port",
+        WEB_AUTO_POLL: "Web 自动轮询"
       };
       return labels[key] || key;
     }
@@ -1510,6 +1570,7 @@ INDEX_HTML = r"""<!doctype html>
       if (key === "POLL_INTERVAL_SECONDS") return "daemon 模式自动检查间隔，例如 300 或 1800。";
       if (key === "WEB_HOST") return "本机访问用 127.0.0.1；云端外部访问用 0.0.0.0。";
       if (key === "WEB_PORT") return "修改端口后需要重启 web 命令才会生效。";
+      if (key === "WEB_AUTO_POLL") return "true 表示打开网页控制台时也按轮询间隔自动运行。";
       return "保存后从下一次运行开始生效。";
     }
 
